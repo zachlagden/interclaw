@@ -615,7 +615,7 @@ poll_once() {
     # Plain output uses unicode box-drawing chars (│) that break IFS splitting.
     local json_list
     # shellcheck disable=SC2086
-    json_list=$(himalaya $acct_flag envelope list --folder INBOX -o json "not seen" 2>/dev/null) || {
+    json_list=$(himalaya $acct_flag envelope list --folder INBOX -o json "not flag seen" 2>/dev/null) || {
         log WARN "Failed to list messages from IMAP"
         return 1
     }

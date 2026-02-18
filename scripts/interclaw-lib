@@ -717,7 +717,7 @@ himalaya_send() {
 himalaya_list_new() {
     # List unread envelopes in INBOX as JSON for reliable parsing.
     # Plain output uses unicode box-drawing chars that break IFS splitting.
-    himalaya envelope list --folder INBOX -o json "not seen" 2>/dev/null || echo "[]"
+    himalaya envelope list --folder INBOX -o json "not flag seen" 2>/dev/null || echo "[]"
 }
 
 himalaya_read_raw() {
