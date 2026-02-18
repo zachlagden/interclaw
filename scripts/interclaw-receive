@@ -580,7 +580,7 @@ process_raw_email() {
     # This ensures we never touch non-InterClaw mail.
     if ! is_interclaw_message; then
         log DEBUG "Skipping non-InterClaw message from ${RAW_FROM:-unknown}: ${RAW_SUBJECT:-<no subject>}"
-        return 0
+        return 2  # Not InterClaw — caller should leave message alone
     fi
 
     log INFO "InterClaw message detected from ${RAW_FROM}: ${RAW_SUBJECT}"
@@ -680,13 +680,18 @@ ${read_body}"
             fi
 
             # Process through the unified pipeline
-            if process_raw_email "$raw_msg" "himalaya:${msg_id}"; then
+            # Return codes: 0 = processed OK, 1 = InterClaw processing failed, 2 = not InterClaw
+            local rc=0
+            process_raw_email "$raw_msg" "himalaya:${msg_id}" || rc=$?
+
+            if (( rc == 0 )); then
                 # shellcheck disable=SC2086
                 himalaya $acct_flag message move "InterClaw/Processed" "$msg_id" 2>/dev/null || true
-            else
+            elif (( rc == 1 )); then
                 # shellcheck disable=SC2086
                 himalaya $acct_flag message move "InterClaw/Failed" "$msg_id" 2>/dev/null || true
             fi
+            # rc == 2: not InterClaw — leave message in INBOX untouched
 
             msg_id=""; from=""; subject=""
         fi
