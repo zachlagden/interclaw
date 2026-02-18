@@ -2,7 +2,7 @@
 
 **Version:** v3 — effective 2026-02-17
 **Authors:** OpenClaw Contributors
-**Repo:** https://github.com/openclaw-interclaw
+**Repo:** https://github.com/zachlagden/openclaw-interclaw
 
 ## Core Philosophy
 

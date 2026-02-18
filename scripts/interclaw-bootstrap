@@ -116,8 +116,9 @@ install_himalaya() {
 
     echo "himalaya: not found, installing..."
 
+    local himalaya_version="v1.1.0"
     local target="${ARCH}-${OS}"
-    local url="https://github.com/pimalaya/himalaya/releases/latest/download/himalaya.${target}.tgz"
+    local url="https://github.com/pimalaya/himalaya/releases/download/${himalaya_version}/himalaya.${target}.tgz"
     local install_dir="${HOME}/.local/bin"
 
     mkdir -p "$install_dir"
