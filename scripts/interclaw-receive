@@ -602,69 +602,95 @@ poll_once() {
         acct_flag="--account ${HIMALAYA_ACCOUNT}"
     fi
 
-    # List unread envelopes
-    local msg_list
+    # Ensure target IMAP folders exist (idempotent, runs once per session)
+    if [[ -z "${_FOLDERS_ENSURED:-}" ]]; then
+        # shellcheck disable=SC2086
+        himalaya $acct_flag folder add "InterClaw/Processed" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        himalaya $acct_flag folder add "InterClaw/Failed" 2>/dev/null || true
+        _FOLDERS_ENSURED=1
+    fi
+
+    # List unread envelopes as JSON for reliable parsing.
+    # Plain output uses unicode box-drawing chars (│) that break IFS splitting.
+    local json_list
     # shellcheck disable=SC2086
-    msg_list=$(himalaya $acct_flag envelope list --folder INBOX "not seen" 2>/dev/null) || {
+    json_list=$(himalaya $acct_flag envelope list --folder INBOX -o json "not seen" 2>/dev/null) || {
         log WARN "Failed to list messages from IMAP"
         return 1
     }
 
-    if [[ -z "$msg_list" ]]; then
+    if [[ -z "$json_list" ]] || [[ "$json_list" == "[]" ]]; then
         log DEBUG "No new messages"
         return 0
     fi
 
-    # Parse himalaya table output: ID | FLAGS | FROM | SUBJECT
+    # Parse JSON envelope list — extract id, from, and subject fields.
+    # Uses bash string processing to avoid jq dependency.
+    # Each envelope is a JSON object; we extract fields line by line.
     local msg_id from subject
-    while IFS='|' read -r msg_id _ from subject; do
-        # Trim whitespace
-        msg_id="${msg_id## }"
-        msg_id="${msg_id%% }"
-        from="${from## }"
-        from="${from%% }"
-        subject="${subject## }"
-        subject="${subject%% }"
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
 
-        # Skip header/separator lines
-        [[ -z "$msg_id" ]] && continue
-        [[ "$msg_id" =~ ^-+$ ]] && continue
-        [[ "$msg_id" == "ID" ]] && continue
-
-        # No pre-filter here — process_raw_email() applies comprehensive
-        # InterClaw filtering (subject tags, X-Agent-ID header, body headers).
-        # Pre-filtering on subject alone would miss valid messages.
-
-        log INFO "Fetching message ${msg_id} from ${from}"
-
-        # Download raw message for proper parsing
-        local raw_msg
-        # shellcheck disable=SC2086
-        raw_msg=$(himalaya $acct_flag message export "$msg_id" 2>/dev/null) || {
-            # Fallback: try human-readable read if export not supported
-            # shellcheck disable=SC2086
-            local plain_body
-            plain_body=$(himalaya $acct_flag message read --preview "$msg_id" 2>/dev/null) || {
-                log WARN "Failed to read message ${msg_id}"
-                continue
-            }
-            # Construct a minimal raw email for the processing pipeline
-            raw_msg="From: ${from}
-Subject: ${subject}
-
-${plain_body}"
-        }
-
-        # Process through the unified pipeline
-        if process_raw_email "$raw_msg" "himalaya:${msg_id}"; then
-            # shellcheck disable=SC2086
-            himalaya $acct_flag message move "InterClaw/Processed" "$msg_id" 2>/dev/null || true
-        else
-            # shellcheck disable=SC2086
-            himalaya $acct_flag message move "InterClaw/Failed" "$msg_id" 2>/dev/null || true
+        # Extract id (numeric or string)
+        if [[ "$line" =~ \"id\"[[:space:]]*:[[:space:]]*\"?([^,\"]+)\"? ]]; then
+            msg_id="${BASH_REMATCH[1]}"
+        fi
+        # Extract from — take the first sender's name or addr
+        if [[ "$line" =~ \"from\"[[:space:]]*: ]]; then
+            if [[ "$line" =~ \"addr\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+                from="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ \"name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+                from="${BASH_REMATCH[1]}"
+            fi
+        fi
+        # Extract subject
+        if [[ "$line" =~ \"subject\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+            subject="${BASH_REMATCH[1]}"
         fi
 
-    done <<< "$msg_list"
+        # Process when we hit the end of an envelope object (has id)
+        # The closing brace or next opening brace signals end of record
+        if [[ -n "${msg_id:-}" ]] && [[ "$line" =~ \}[[:space:]]*,?[[:space:]]*$ ]]; then
+            log INFO "Fetching message ${msg_id} from ${from:-unknown}"
+
+            # Export full raw .eml for proper parsing (preserves all headers)
+            local raw_msg=""
+            local tmpdir
+            tmpdir=$(mktemp -d)
+            # shellcheck disable=SC2086
+            if himalaya $acct_flag message export --full -d "${tmpdir}/msg.eml" "$msg_id" 2>/dev/null; then
+                raw_msg=$(cat "${tmpdir}/msg.eml")
+            fi
+            rm -rf "$tmpdir"
+
+            if [[ -z "$raw_msg" ]]; then
+                # Fallback: read human-friendly text and construct minimal headers
+                local read_body
+                # shellcheck disable=SC2086
+                read_body=$(himalaya $acct_flag message read --preview "$msg_id" 2>/dev/null) || {
+                    log WARN "Failed to read message ${msg_id}"
+                    msg_id=""; from=""; subject=""
+                    continue
+                }
+                raw_msg="From: ${from:-unknown}
+Subject: ${subject:-}
+
+${read_body}"
+            fi
+
+            # Process through the unified pipeline
+            if process_raw_email "$raw_msg" "himalaya:${msg_id}"; then
+                # shellcheck disable=SC2086
+                himalaya $acct_flag message move "InterClaw/Processed" "$msg_id" 2>/dev/null || true
+            else
+                # shellcheck disable=SC2086
+                himalaya $acct_flag message move "InterClaw/Failed" "$msg_id" 2>/dev/null || true
+            fi
+
+            msg_id=""; from=""; subject=""
+        fi
+    done <<< "$(echo "$json_list" | tr ',' '\n' | tr '[' '\n' | tr ']' '\n')"
 
     return 0
 }

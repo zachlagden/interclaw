@@ -29,6 +29,7 @@ Install InterClaw dependencies and symlink scripts to PATH.
 Options:
   --skip-deps       Skip dependency installation (gpg, himalaya)
   --skip-symlinks   Skip symlinking scripts to ~/.local/bin
+  --remove          Remove InterClaw symlinks from ~/.local/bin
   -h, --help        Show this help message
 
 This script is idempotent — running it multiple times is safe.
@@ -39,11 +40,13 @@ EOF
 # ── Parse flags ───────────────────────────────────────────────────
 SKIP_DEPS=false
 SKIP_SYMLINKS=false
+DO_REMOVE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-deps)     SKIP_DEPS=true; shift ;;
         --skip-symlinks) SKIP_SYMLINKS=true; shift ;;
+        --remove)        DO_REMOVE=true; shift ;;
         -h|--help)       usage ;;
         *)               echo "Unknown option: $1"; usage ;;
     esac
@@ -215,7 +218,30 @@ ensure_path() {
     echo "PATH: exported for current session"
 }
 
+# ── Remove ────────────────────────────────────────────────────────
+remove_symlinks() {
+    local bin_dir="${HOME}/.local/bin"
+    local count=0
+    for link in "${bin_dir}"/interclaw-*; do
+        [[ -L "$link" ]] || continue
+        rm -f "$link"
+        count=$(( count + 1 ))
+    done
+    echo "Removed ${count} InterClaw symlinks from ${bin_dir}/"
+}
+
 # ── Main ──────────────────────────────────────────────────────────
+if [[ "$DO_REMOVE" == "true" ]]; then
+    echo "InterClaw Uninstall"
+    echo "==================="
+    echo ""
+    remove_symlinks
+    echo ""
+    echo "Symlinks removed. Dependencies (gpg, himalaya) were not uninstalled."
+    echo "To remove config and state: rm -rf ~/.interclaw"
+    exit 0
+fi
+
 echo "InterClaw Bootstrap"
 echo "==================="
 echo ""

@@ -202,17 +202,14 @@ generate_ulid() {
 # Returns the next GlobalSeq and increments the counter atomically.
 # Uses flock to prevent TOCTOU races between concurrent processes.
 next_global_seq() {
-    local lock_file="${INTERCLAW_GLOBAL_SEQ_FILE}.lock"
+    local seq_file="${INTERCLAW_GLOBAL_SEQ_FILE}"
     local next
-    next=$(
-        exec 200>"$lock_file"
-        flock -x 200
-        local current
-        current=$(cat "${INTERCLAW_GLOBAL_SEQ_FILE}" 2>/dev/null || echo "0")
-        local n=$(( current + 1 ))
-        echo "${n}" > "${INTERCLAW_GLOBAL_SEQ_FILE}"
+    next=$(flock "${seq_file}.lock" bash -c '
+        current=$(cat "'"$seq_file"'" 2>/dev/null || echo "0")
+        n=$(( current + 1 ))
+        echo "${n}" > "'"$seq_file"'"
         echo "${n}"
-    )
+    ')
     printf "D-%03d" "${next}"
 }
 
@@ -260,17 +257,13 @@ next_conv_seq() {
     fi
 
     local seq_file="${conv_dir}/conv_seq"
-    local lock_file="${seq_file}.lock"
     local next
-    next=$(
-        exec 200>"$lock_file"
-        flock -x 200
-        local current
-        current=$(cat "${seq_file}" 2>/dev/null || echo "0")
-        local n=$(( current + 1 ))
-        echo "${n}" > "${seq_file}"
+    next=$(flock "${seq_file}.lock" bash -c '
+        current=$(cat "'"$seq_file"'" 2>/dev/null || echo "0")
+        n=$(( current + 1 ))
+        echo "${n}" > "'"$seq_file"'"
         echo "${n}"
-    )
+    ')
 
     # Update last_activity
     local ts; ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -707,6 +700,9 @@ sanitize_body() {
 
 # ── Himalaya Helpers ──────────────────────────────────────────────
 # These use the himalaya v1.1.0 CLI subcommand structure.
+# HIMALAYA_CONFIG is exported by load_config(); himalaya reads it
+# from the environment automatically ([env: HIMALAYA_CONFIG=]).
+
 himalaya_send() {
     local to="$1"
     local subject="$2"
@@ -719,11 +715,26 @@ himalaya_send() {
 }
 
 himalaya_list_new() {
-    # List unread envelopes in INBOX
-    himalaya envelope list --folder INBOX "not seen" 2>/dev/null || true
+    # List unread envelopes in INBOX as JSON for reliable parsing.
+    # Plain output uses unicode box-drawing chars that break IFS splitting.
+    himalaya envelope list --folder INBOX -o json "not seen" 2>/dev/null || echo "[]"
+}
+
+himalaya_read_raw() {
+    # Export full raw .eml to a temp file and cat it.
+    local msg_id="$1"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    himalaya message export --full -d "${tmpdir}/msg.eml" "$msg_id" 2>/dev/null || {
+        rm -rf "$tmpdir"
+        return 1
+    }
+    cat "${tmpdir}/msg.eml"
+    rm -rf "$tmpdir"
 }
 
 himalaya_read() {
+    # Read human-friendly message without marking as seen.
     local msg_id="$1"
     himalaya message read --preview "$msg_id" 2>/dev/null
 }
@@ -732,6 +743,12 @@ himalaya_move() {
     local msg_id="$1"
     local folder="$2"
     himalaya message move "$folder" "$msg_id" 2>/dev/null || true
+}
+
+himalaya_ensure_folder() {
+    # Create an IMAP folder if it doesn't already exist.
+    local folder="$1"
+    himalaya folder add "$folder" 2>/dev/null || true
 }
 
 # ── Threads JSON Generation ──────────────────────────────────────
@@ -870,39 +887,34 @@ check_rate_limit() {
     local limit="${2:-60}"
     local window_file="${INTERCLAW_STATE_DIR}/.ratelimit_${sender//[^a-zA-Z0-9]/_}"
 
-    local lock_file="${window_file}.lock"
     local result
-    result=$(
-        exec 200>"$lock_file"
-        flock -x 200
-
-        local now; now=$(date +%s)
-        local window_start=$(( now - 3600 ))
-
-        # Read and filter timestamps within the last hour
-        local count=0
-        local new_content=""
-        if [[ -f "$window_file" ]]; then
+    result=$(flock "${window_file}.lock" bash -c '
+        window_file="$1"
+        limit="$2"
+        now=$(date +%s)
+        window_start=$(( now - 3600 ))
+        count=0
+        new_content=""
+        if [ -f "$window_file" ]; then
             while IFS= read -r ts; do
-                [[ -z "$ts" ]] && continue
-                if (( ts > window_start )); then
-                    new_content+="${ts}"$'\n'
+                [ -z "$ts" ] && continue
+                if [ "$ts" -gt "$window_start" ] 2>/dev/null; then
+                    new_content="${new_content}${ts}
+"
                     count=$(( count + 1 ))
                 fi
             done < "$window_file"
         fi
-
-        if (( count >= limit )); then
-            # Write back filtered entries, then signal rejection
-            printf '%s' "$new_content" > "$window_file"
+        if [ "$count" -ge "$limit" ]; then
+            printf "%s" "$new_content" > "$window_file"
             echo "REJECTED"
         else
-            # Append current timestamp and write back
-            new_content+="${now}"$'\n'
-            printf '%s' "$new_content" > "$window_file"
+            new_content="${new_content}${now}
+"
+            printf "%s" "$new_content" > "$window_file"
             echo "OK"
         fi
-    )
+    ' _ "$window_file" "$limit")
 
     if [[ "$result" == "REJECTED" ]]; then
         log WARN "Rate limit exceeded for ${sender}: limit=${limit} per hour"
